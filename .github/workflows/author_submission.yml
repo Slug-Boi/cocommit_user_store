@@ -72,14 +72,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          git fetch
-
           git config user.name "author-store-bot"
           git config user.email "actions@users.noreply.github.com"
 
           BRANCH="add-author-${UUID}"
-          git checkout -b "$BRANCH"
 
+          git push origin --delete "$BRANCH" 2>/dev/null || true
+
+          git checkout -b "$BRANCH"
           git add data/ index.json
           git commit -m "Add/update author: ${ISSUE_AUTHOR} (${UUID})"
           git push origin "$BRANCH"
@@ -87,13 +87,10 @@ jobs:
           PR_URL=$(gh pr create \
             --title "Add author: ${ISSUE_AUTHOR}" \
             --body "Automated submission from issue #${ISSUE_NUMBER} by @${ISSUE_AUTHOR}." \
-            --base main \
+            --base master \
             --head "$BRANCH")
 
-          gh pr merge "$PR_URL" --squash --delete-branch --admin
-
-      - name: Close issue
-        if: success()
+          gh pr merge "$PR_URL" --squash --delete-branch --admin  if: success()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
