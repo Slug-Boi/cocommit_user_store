@@ -72,6 +72,8 @@ jobs:
         run: |
           set -euo pipefail
 
+          git fetch
+
           git config user.name "author-store-bot"
           git config user.email "actions@users.noreply.github.com"
 
