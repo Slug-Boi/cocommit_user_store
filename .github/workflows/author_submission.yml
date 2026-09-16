@@ -1,0 +1,104 @@
+concurrency:
+  group: author-publish-queue
+  cancel-in-progress: false
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  ingest:
+    if: contains(github.event.issue.labels.*.name, 'author-submission')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build user_check
+        run: go build -o user_check ./cmd/user_check
+
+      - name: Parse and validate submission
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+        run: |
+          set -euo pipefail
+
+          # Write to a file rather than passing $ISSUE_BODY through further
+          # shell expansion — keeps multiline/special-char content intact.
+          printf '%s' "$ISSUE_BODY" > issue_body.txt
+
+          # uuid: <uuid>
+          UUID=$(grep -m1 '^uuid: ' issue_body.txt | sed 's/^uuid: //' | tr -d '[:space:]')
+
+          # blob lives between the two ``` fences
+          BLOB=$(awk '/^```/{c++; next} c==1' issue_body.txt)
+
+          if [ -z "$UUID" ] || [ -z "$BLOB" ]; then
+            echo "::error::Could not parse uuid or blob from issue body"
+            exit 1
+          fi
+
+          # basic shape check before handing off to the Go binary
+          if ! echo "$UUID" | grep -qE '^[0-9a-fA-F-]{36}$'; then
+            echo "::error::UUID does not look well-formed"
+            exit 1
+          fi
+
+          echo "UUID=$UUID" >> "$GITHUB_ENV"
+          echo "BLOB=$BLOB" >> "$GITHUB_ENV"
+
+      - name: Validate author payload
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+        run: |
+          set -euo pipefail
+          PATH_WRITTEN=$(./user_check "$UUID" "$BLOB" "$ISSUE_AUTHOR")
+          echo "PATH_WRITTEN=$PATH_WRITTEN" >> "$GITHUB_ENV"
+
+      - name: Commit, PR, and merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "author-store-bot"
+          git config user.email "actions@users.noreply.github.com"
+
+          BRANCH="add-author-${UUID}"
+          git checkout -b "$BRANCH"
+
+          git add data/ index.json
+          git commit -m "Add/update author: ${ISSUE_AUTHOR} (${UUID})"
+          git push origin "$BRANCH"
+
+          PR_URL=$(gh pr create \
+            --title "Add author: ${ISSUE_AUTHOR}" \
+            --body "Automated submission from issue #${ISSUE_NUMBER} by @${ISSUE_AUTHOR}." \
+            --base main \
+            --head "$BRANCH")
+
+          gh pr merge "$PR_URL" --squash --delete-branch --admin
+
+      - name: Close issue
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --body "Your author profile was published to \`${PATH_WRITTEN}\`."
+          gh issue close "$ISSUE_NUMBER"
+
+      - name: Report failure on issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --body "Could not process this submission. Please check the format and try again." || true 
