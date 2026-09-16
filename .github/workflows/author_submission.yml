@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build user_check
-        run: go build -o user_check ./cmd/user_check
+        run: go build -o user_check ./main.go
 
       - name: Parse and validate submission
         env:
