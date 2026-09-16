@@ -9,6 +9,8 @@ import (
 	"regexp"
 )
 
+// User is the struct each serialized author profile decodes into.
+// Only used here for validation — the file on disk stores the raw blob, not this.
 type User struct {
 	Shortname string   `json:"shortname"`
 	Longname  string   `json:"longname"`
@@ -20,18 +22,24 @@ type User struct {
 	Platform  string   `json:"platform,omitempty"`
 }
 
+// IndexEntry is one row in the top-level index.json — enough to look
+// someone up without fetching every author file individually.
 type IndexEntry struct {
 	UUID     string `json:"uuid"`
-	Login    string `json:"login"`
-	Username string `json:"username"`
+	Login    string `json:"login"`    // GitHub login that owns this entry — source of truth for auth
+	Username string `json:"username"` // platform-specific, NOT unique — display/lookup only
 	Platform string `json:"platform"`
 	Path     string `json:"path"`
 }
+
+const indexPath = "index.json"
 
 var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 // decodeUser expects the serialized payload to always be a JSON array,
 // even for a single-author submission, and unwraps it to the one entry.
+// This is purely a validation step — we never write the decoded User
+// back to disk, only the original blob.
 func decodeUser(encoded string) (User, error) {
 	raw, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
@@ -55,52 +63,66 @@ func decodeUser(encoded string) (User, error) {
 	return u, nil
 }
 
-func writeAuthorFile(login, uuid string, u User) (string, error) {
+// writeAuthorFile stores the original base64 blob as-is, not the
+// unmarshaled/pretty-printed JSON.
+func writeAuthorFile(login, uuid, encoded string) (string, error) {
 	dir := filepath.Join("data", login)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
 
-	path := filepath.Join(dir, uuid+".json")
-	data, err := json.MarshalIndent(u, "", "  ")
-	if err != nil {
-		return "", err
-	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	path := filepath.Join(dir, uuid+".txt")
+	if err := os.WriteFile(path, []byte(encoded), 0o644); err != nil {
 		return "", err
 	}
 	return path, nil
 }
 
-func updateIndex(entry IndexEntry) error {
-	const indexPath = "index.json"
-
+func loadIndex() ([]IndexEntry, error) {
 	var index []IndexEntry
-	if raw, err := os.ReadFile(indexPath); err == nil {
-		if err := json.Unmarshal(raw, &index); err != nil {
-			return fmt.Errorf("parsing existing index: %w", err)
+
+	raw, err := os.ReadFile(indexPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return index, nil
 		}
-	} else if !os.IsNotExist(err) {
-		return err
+		return nil, err
 	}
 
-	replaced := false
-	for i, e := range index {
-		if e.UUID == entry.UUID {
-			index[i] = entry
-			replaced = true
-			break
-		}
+	if err := json.Unmarshal(raw, &index); err != nil {
+		return nil, fmt.Errorf("parsing existing index: %w", err)
 	}
-	if !replaced {
-		index = append(index, entry)
-	}
+	return index, nil
+}
 
+func writeIndex(index []IndexEntry) error {
 	data, err := json.MarshalIndent(index, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(indexPath, data, 0o644)
+}
+
+// updateIndex inserts a new entry, or updates an existing one — but only
+// if the submitting login already owns that uuid.
+func updateIndex(entry IndexEntry) error {
+	index, err := loadIndex()
+	if err != nil {
+		return err
+	}
+
+	for i, e := range index {
+		if e.UUID == entry.UUID {
+			if e.Login != entry.Login {
+				return fmt.Errorf("uuid %s is owned by %s, not %s", entry.UUID, e.Login, entry.Login)
+			}
+			index[i] = entry
+			return writeIndex(index)
+		}
+	}
+
+	index = append(index, entry)
+	return writeIndex(index)
 }
 
 func main() {
@@ -127,7 +149,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	path, err := writeAuthorFile(authorLogin, uuid, user)
+	path, err := writeAuthorFile(authorLogin, uuid, encoded)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "write failed:", err)
 		os.Exit(1)
@@ -144,6 +166,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Println(path)
+	fmt.Println(path) // bash reads this for the commit message / issue comment
 	os.Exit(0)
 }
