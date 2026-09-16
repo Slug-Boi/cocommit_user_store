@@ -90,7 +90,8 @@ jobs:
             --base master \
             --head "$BRANCH")
 
-          gh pr merge "$PR_URL" --squash --delete-branch --admin  if: success()
+          gh pr merge "$PR_URL" --squash --delete-branch --admin
+
       - name: Close issue
         if: success()
         env:
@@ -99,7 +100,6 @@ jobs:
         run: |
           gh issue comment "$ISSUE_NUMBER" --body "Your author profile was published to \`${PATH_WRITTEN}\`."
           gh issue close "$ISSUE_NUMBER"
-
       - name: Report failure on issue
         if: failure()
         env:
